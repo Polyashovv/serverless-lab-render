@@ -1,36 +1,45 @@
 from flask import Flask, request, jsonify
+import psycopg
 import os
-import json
-from werkzeug.exceptions import BadRequest
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
-@app.route('/')
-def hello():
-    return "Hello, Serverless! 🚀\n", 200, {'Content-Type': 'text/plain'}
+DATABASE_URL = os.environ.get('DATABASE_URL')
+conn = None
+if DATABASE_URL:
+    url = urlparse(DATABASE_URL)
+    conn = psycopg.connect(DATABASE_URL, autocommit=True)
 
-@app.route('/echo', methods=['POST'])
-def echo():
-    try:
-        data = request.get_json(silent=True)
-    except BadRequest:
-        data = None
+if conn:
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
 
-    if data is None:
-        raw = request.get_data(as_text=True)
-        if raw:
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                return jsonify({"error": "Invalid JSON in request body", "raw": raw}), 400
-        else:
-            return jsonify({"error": "No JSON body sent"}), 400
+@app.route('/save', methods=['POST'])
+def save_message():
+    if not conn:
+        return jsonify({"error": "DB not connected"}), 500
+    data = request.get_json()
+    message = data.get('message', '')
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO messages (content) VALUES (%s)", (message,))
+    return jsonify({"status": "saved", "message": message})
 
-    return jsonify({
-        "status": "received",
-        "you_sent": data,
-        "length": len(str(data))
-    })
+@app.route('/messages')
+def get_messages():
+    if not conn:
+        return jsonify({"error": "DB not connected"}), 500
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, content, created_at FROM messages ORDER BY id DESC LIMIT 10")
+        rows = cur.fetchall()
+    messages = [{"id": r[0], "text": r[1], "time": r[2].isoformat()} for r in rows]
+    return jsonify(messages)
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
